@@ -20,21 +20,27 @@
 
 // MACROS
 #define MQ_NAME "/mq_cola" // Nombre de la cola de mensajes
-#define SEM_NAME "/semaforo" // Nombre del sem·foro
+#define MQ_NAME2 "/mq_cola2" // Nombre de la cola de mensajes
+#define SEM_NAME "/semaforo" // Nombre del sem√°foro
 #define ARR_SIZE 128
 
 struct mq_attr attributes = {
   .mq_flags = 0, // flags de la cola (ignorados por mq_open())
-  .mq_maxmsg = 10, // N˙mero m·ximo de mensajes en la cola
-  .mq_curmsgs = 0, // N˙mero actual de mensajes en la cola (ignorados por mq_open())
-  .mq_msgsize = sizeof(char) * ARR_SIZE // Tamano m·ximo de cada mensaje
+  .mq_maxmsg = 10, // N√∫mero m√°ximo de mensajes en la cola
+  .mq_curmsgs = 0, // N√∫mero actual de mensajes en la cola (ignorados por mq_open())
+  .mq_msgsize = sizeof(char) * ARR_SIZE // Tamano m√°ximo de cada mensaje
 };
 
 // VARIABLES GLOBALES
 mqd_t mqd; // Cola de mensajes
+mqd_t mqd_b; // Cola de mensajes
 
-sem_t sem_diag; // Sem·foro para el diagnÛstico
-sem_t sem_farm; // Sem·foro para la farmacia
+
+sem_t sem_exp;
+sem_t sem_diag; // Sem√°foro para el diagn√≥stico
+sem_t sem_farm; // Sem√°foro para la farmacia
+sem_t * sem_rec; // Sem√°foro para la farmacia
+
 
 int pacientes_dados_de_alta = 0; // Contador de pacientes dados de alta
 int nuevos_pacientes = 0; // Contador de nuevos pacientes
@@ -45,52 +51,62 @@ pid_t pid_hospital, pid_recepcion; // Identificadores de los procesos padre e hi
 
 // FUNCIONES
 
-// FunciÛn para generar un n˙mero aleatorio entre un rango
+// Funci√≥n para generar un n√∫mero aleatorio entre un rango
 int tiempo_aleatorio(int min, int max) {
   return rand() % (max - min + 1) + min;
 }
 
-// FunciÛn para manejar la senal SIGINT (interrupciÛn)
+// Funci√≥n para manejar la senal SIGINT (interrupci√≥n)
 void sigint(int sig) {
 	 
   mq_close(mqd); // Cierra la cola de mensajes
+  mq_close(mqd_b); // Cierra la cola de mensajes
+
   mq_unlink(MQ_NAME); // Elimina la cola de mensajes
-  sem_destroy( &sem_farm); // Destruye el sem·foro de farmacia
-  sem_destroy( &sem_diag); // Destruye el sem·foro de diagnÛstico
-  sem_unlink(SEM_NAME); // Elimina el sem·foro
+  mq_unlink(MQ_NAME2); // Elimina la cola de mensajes
+
+  sem_destroy( &sem_farm); // Destruye el sem√°foro de farmacia
+  sem_destroy( &sem_diag); // Destruye el sem√°foro de diagn√≥stico
+  sem_destroy( sem_rec); // Destruye el sem√°foro de diagn√≥stico
+  
+  sem_unlink(SEM_NAME); // Elimina el sem√°foro
   printf("El padre ha terminado\n");
-  exit(0);
+  
 }
 
-// FunciÛn para finalizar el proceso hijo
+// Funci√≥n para finalizar el proceso hijo
 void endProcess(int sig) {
   printf("El hijo ha terminado\n");
   exit(0);
 }
 
 void endHospital(int sig) {
-  	 pthread_cancel(exp_thr);
+  pthread_cancel(exp_thr);
   pthread_cancel(diag_thr);
   pthread_cancel(farm_thr);
 
   
-      // El padre espera que los hilos finalicen
-      pthread_join(exp_thr, NULL);
-      pthread_join(diag_thr, NULL);
-      pthread_join(farm_thr, NULL);
+  // El padre espera que los hilos finalicen
+  pthread_join(exp_thr, NULL);
+  pthread_join(diag_thr, NULL);
+  pthread_join(farm_thr, NULL);
 
   printf("El hijo ha terminado\n");
   exit(0);
 }
 
-
-// FunciÛn para notificar a la recepciÛn (envÌa la senal SIGUSR1)
-void notificaRecepcion(int sig) {
-  signal(SIGUSR1, notificaRecepcion); // Recibe senales SIGUSR1
-  kill(pid_recepcion, SIGUSR1); // EnvÌa la senal SIGUSR1 al proceso de recepciÛn
+void trat(int sig){
+	signal(SIGUSR2, trat);
 }
 
-// FunciÛn para actualizar el n˙mero de pacientes dados de alta
+
+// Funci√≥n para notificar a la recepci√≥n (env√≠a la senal SIGUSR1)
+void notificaRecepcion(int sig) {
+  signal(SIGUSR1, notificaRecepcion); // Recibe senales SIGUSR1
+  kill(pid_recepcion, SIGUSR1); // Env√≠a la senal SIGUSR1 al proceso de recepci√≥n
+}
+
+// Funci√≥n para actualizar el n√∫mero de pacientes dados de alta
 void pacientesConMedicacion(int sig) {
   signal(SIGUSR1, pacientesConMedicacion); // Espera para la senal de nuevo
   pacientes_dados_de_alta += 1; // Incrementa el contador de pacientes dados de alta
@@ -99,86 +115,101 @@ void pacientesConMedicacion(int sig) {
 
 //----------------------------------------------------------------
 
-// FunciÛn del hilo de exploraciÛn
+// Funci√≥n del hilo de exploraci√≥n
 void * exploracion(void * args) {
-  printf("[Exploraci√≥n] Comienzo mi ejecuci√≥n...\n");
+  printf("[Exploracion] Comienzo mi ejecucion...\n");
   // Abre la cola de mensajes en modo solo lectura
-  mqd_t mqd = mq_open(MQ_NAME, O_RDONLY | O_CREAT, 0644, &attributes);
-
+  mqd_t mqd = mq_open(MQ_NAME, O_CREAT | O_RDONLY, 0644, &attributes);
+  mqd_b = mq_open(MQ_NAME2, O_CREAT | O_WRONLY, 0644, &attributes);
+  
   while (1) {
     char paciente[ARR_SIZE];
     signal(SIGUSR1, SIG_IGN); // Ignora senales SIGUSR1
-    printf("[Exploraci√≥n] Esperando a un paciente...\n");
+    printf("[Exploracion] Esperando a un paciente...\n");
+    	
     mq_receive(mqd, paciente, sizeof(char) * ARR_SIZE, NULL); // Recibe un mensaje de la cola
-    printf("[Exploraci√≥n] Recibido paciente: %s. Realizando exploraci√≥n...\n", paciente);
-
-    // Simula el tiempo de exploraciÛn
+    printf("[Exploracion] Recibido paciente: %s. Realizando exploracion...\n", paciente);
+    
+    // Simula el tiempo de exploraci√≥n
     sleep(tiempo_aleatorio(1, 3));
+    sem_post(sem_rec);
 
-    printf("[Exploraci√≥n] Exploraci√≥n completa con paciente %s. Notificando diagn√≥stico...\n", paciente);
+    printf("[Exploracion] Exploracion completa con paciente %s. Notificando diagnostico...\n", paciente);
 
-    // Desbloquea el sem·foro para que el hilo de diagnÛstico contin˙e
+    mq_send(mqd_b, paciente, sizeof(char) * ARR_SIZE, 1);
+      	
+  }
+}
+
+// Funci√≥n del hilo de diagn√≥stico
+void * diagnostico(void * args) {
+  printf("[Diagnostico] Comienzo mi ejecucion...\n");
+  
+
+  mqd_t mqd_b = mq_open(MQ_NAME2, O_CREAT | O_RDONLY, 0644, &attributes);
+  char paciente[ARR_SIZE];
+
+  while (1) {
+
+    signal(SIGUSR1, SIG_IGN); // Ignora senales SIGUSR1
+     
+    sem_wait( &sem_diag); // Decrementa el valor del sem√°foro (espera hasta que se libere)
+    mq_receive(mqd_b, paciente, sizeof(char) * ARR_SIZE, NULL); // Recibe un mensaje de la cola
+    
+    printf("[Diagnostico] Realizando pruebas diagnosticas...\n");
+    sleep(tiempo_aleatorio(5, 10)); // Simula el tiempo de las pruebas de diagn√≥stico
+
+    printf("[Diagnostico] Diagnostico completado. Notificando farmacia...\n");
+
+    // Desbloquea el sem√°foro de farmacia para continuar el proceso en farmacia
+    pthread_kill(farm_thr, SIGUSR2);
     sem_post( &sem_diag);
   }
 }
 
-// FunciÛn del hilo de diagnÛstico
-void * diagnostico(void * args) {
-  printf("[Diagn√≥stico] Comienzo mi ejecuci√≥n...\n");
-
+// Funci√≥n del hilo de farmacia
+void * farmacia(void * args) {
+  
+  printf("[Farmacia] Comienzo mi ejecucion...\n");
+  signal(SIGUSR2,trat);
   while (1) {
     signal(SIGUSR1, SIG_IGN); // Ignora senales SIGUSR1
-    sem_wait( &sem_diag); // Decrementa el valor del sem·foro (espera hasta que se libere)
+    sem_wait( &sem_farm); // Decrementa el sem√°foro, esperando que el diagn√≥stico est√© listo
+    
+    pause();
+    printf("[Farmacia] Preparando medicacion...\n");
+    sleep(tiempo_aleatorio(1, 3)); // Simula el tiempo de preparaci√≥n de la medicaci√≥n
 
-    printf("[Diagn√≥stico] Realizando pruebas diagn√≥sticas...\n");
-    sleep(tiempo_aleatorio(5, 10)); // Simula el tiempo de las pruebas de diagnÛstico
+    printf("[Farmacia] Medicacion lista. Enviando se√±al de alta...\n");
 
-    printf("[Diagn√≥stico] Diagn√≥stico completado. Notificando farmacia...\n");
-
-    // Desbloquea el sem·foro de farmacia para continuar el proceso en farmacia
+    // Notifica a la recepci√≥n de que la medicaci√≥n est√° lista
+    kill(pid_recepcion, SIGUSR1);
     sem_post( &sem_farm);
   }
 }
 
-// FunciÛn del hilo de farmacia
-void * farmacia(void * args) {
-  signal(SIGUSR1, SIG_IGN); // Ignora senales SIGUSR1
-  printf("[Farmacia] Comienzo mi ejecuci√≥n...\n");
-
-  while (1) {
-    sem_wait( &sem_farm); // Decrementa el sem·foro, esperando que el diagnÛstico estÈ listo
-
-    printf("[Farmacia] Preparando medicaci√≥n...\n");
-    sleep(tiempo_aleatorio(1, 3)); // Simula el tiempo de preparaciÛn de la medicaciÛn
-
-    printf("[Farmacia] Medicaci√≥n lista. Enviando se√±al de alta...\n");
-
-    // Notifica a la recepciÛn de que la medicaciÛn est· lista
-    kill(pid_recepcion, SIGUSR1);
-  }
-}
-
 void main(int argv, char * argc[]) {
-  sem_init( &sem_diag, 0, 0); // Inicializa el sem·foro para diagnÛstico con valor 0 (bloqueado)
-  sem_init( &sem_farm, 0, 0); // Inicializa el sem·foro para farmacia con valor 0 (bloqueado)
+  sem_init( &sem_diag, 0, 1); // Inicializa el sem√°foro para diagn√≥stico con valor 0 (bloqueado)
+  sem_init( &sem_farm, 0, 1); // Inicializa el sem√°foro para farmacia con valor 0 (bloqueado)
+  sem_rec = sem_open( SEM_NAME , O_CREAT , 0666, 1);
 
-  pid_recepcion = fork(); // Crea un proceso hijo para la recepciÛn
+  pid_recepcion = fork(); // Crea un proceso hijo para la recepci√≥n
 
   if (pid_recepcion != 0) { // Proceso padre
     pid_hospital = fork(); // Crea un proceso hijo para el hospital
     if (pid_hospital != 0) { // Proceso abuelo (padre de hospital)
       int status;
-      signal(SIGINT, sigint); // Configura la senal SIGINT (Ctrl+C) para manejarla
-      for (int i = 0; i < 2; i++) { // El padre espera a sus dos hijos (hospital y recepciÛn)
-        pid_t child_pid = wait( &status); // Espera quelos hijos terminen
+      signal(SIGINT, sigint); // Configura la se√±al SIGINT (Ctrl+C) para manejarla
+      for (int i = 0; i < 2; i++) { // El padre espera a sus dos hijos (hospital y recepci√≥n)
+        pid_t child_pid = wait( &status); // Espera a que los hijos terminen
       }
     } else {
       // Proceso hospital
-      signal(SIGINT, endHospital); // Maneja la senal SIGINT
-      signal(SIGUSR1, notificaRecepcion); // Configura la senal SIGUSR1 para notificar a la recepciÛn
-      printf("[Hospital] Comienzo mi ejecuci√≥n...\n");
+      signal(SIGINT, endHospital); // Maneja la se√±al SIGINT
+      signal(SIGUSR1, notificaRecepcion); // Configura la se√±al SIGUSR1 para notificar a la recepci√≥n
+      printf("[Hospital] Comienzo mi ejecucion...\n");
 
-      // Crea los hilos para exploraciÛn, diagnÛstico y farmacia
+      // Crea los hilos para exploraci√≥n, diagn√≥stico y farmacia
       int exp = pthread_create( &exp_thr, NULL, exploracion, NULL);
       if (exp != 0) {
         printf("ERROR; return code from pthread_create() is %d\n", exp);
@@ -203,22 +234,25 @@ void main(int argv, char * argc[]) {
       pthread_join(farm_thr, NULL);
     }
   } else {
-    // Proceso recepciÛn
-    printf("[Recepci√≥n] Comienzo mi ejecuci√≥n...\n");
-    signal(SIGINT, endProcess); // Maneja la senal SIGINT
-    signal(SIGUSR1, pacientesConMedicacion); // Configura la senal SIGUSR1 para contar pacientes dados de alta
+    // Proceso recepci√≥n
+    printf("[Recepcion] Comienzo mi ejecucion...\n");
+    signal(SIGINT, endProcess); // Maneja la se√±al SIGINT
+    signal(SIGUSR1, pacientesConMedicacion); // Configura la se√±al SIGUSR1 para contar pacientes dados de alta
 
     while (1) {
       char paciente[ARR_SIZE];
+      sem_wait( sem_rec);
       sleep(tiempo_aleatorio(1, 10)); // Simula el tiempo de registro de nuevos pacientes
       sprintf(paciente, "El mensaje de la recepcion: %d", nuevos_pacientes += 1);
-      printf("[Recepci√≥n] Registrando nuevo paciente: %s...\n", paciente);
+      printf("[Recepcion] Registrando nuevo paciente: %s...\n", paciente);
 
       // Abre la cola de mensajes en modo solo escritura
       mqd = mq_open(MQ_NAME, O_WRONLY | O_CREAT, 0644, &attributes); //El propietario del archivo puede leer y escribir en la cola de mensajes y el grupo y los otros usuarios solo pueden leer la cola de mensajes.
 
-      // EnvÌa el mensaje de registro a la cola
+      // Env√≠a el mensaje de registro a la cola
       mq_send(mqd, paciente, sizeof(char) * ARR_SIZE, 1);
+          
+
     }
   }
 
